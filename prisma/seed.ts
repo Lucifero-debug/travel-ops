@@ -213,7 +213,12 @@ async function main() {
       payments: {
         create: [
           { kind: "ADVANCE", mode: "UPI", amountPaise: lakh(1.0), paidOn: day(-6), reference: "UPI/4471" },
-          { kind: "BALANCE", mode: "BANK_TRANSFER", amountPaise: lakh(1.08), dueOn: day(5), paidOn: null },
+        {
+  kind: "BALANCE",
+  mode: "BANK_TRANSFER",
+  amountPaise: lakh(1.08),
+  dueOn: day(5)
+},
         ],
       },
       vendorBookings: {
