@@ -30,8 +30,13 @@ export async function addPayment(formData: FormData) {
       mode,
       // A refund is stored negative, so every total is a plain sum.
       amountPaise: kind === "REFUND" ? -Math.abs(amount) : Math.abs(amount),
-      paidOn: received ? (date(formData.get("on")) ?? new Date()) : null,
-      dueOn: received ? null : date(formData.get("on")),
+  paidOn: received
+  ? (date(formData.get("on")) ?? new Date())
+  : undefined,
+
+dueOn: received
+  ? undefined
+  : (date(formData.get("on")) ?? undefined),
       reference: String(formData.get("reference") ?? "") || null,
     },
   });
