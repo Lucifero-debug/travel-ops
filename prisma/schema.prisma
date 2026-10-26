@@ -1,0 +1,535 @@
+// Travel Ops: back office for a small Indian tour operator.
+//
+// Money is stored in paise as Int everywhere. Never use Float for money:
+// 0.1 + 0.2 is not 0.3, and an invoice that is one paisa out is a support
+// call. Helpers for formatting live in lib/money.ts.
+//
+// Dates that represent a day (travel dates, due dates) are DateTime at
+// midnight IST. Timestamps are DateTime with timezone semantics left to
+// the application; the whole system runs in one timezone.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// People who work here
+// ---------------------------------------------------------------------
+
+enum Role {
+  OWNER // sees margins, costs and reports
+  AGENT // sells: enquiries, quotations, bookings
+  OPS //   operates: vendor bookings, vouchers, documents
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  phone     String?
+  role      Role     @default(AGENT)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  enquiries  Enquiry[]
+  bookings   Booking[]
+  activities Activity[]
+}
+
+// ---------------------------------------------------------------------
+// Customers and enquiries
+//
+// An enquiry is the unit of sales work. Most never become bookings, so it
+// carries its own lifecycle, its own follow-up date, and a lost reason:
+// knowing why you lose is worth more than knowing that you lost.
+// ---------------------------------------------------------------------
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String // the primary key in practice: everyone here works on WhatsApp
+  email     String?
+  city      String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  enquiries Enquiry[]
+  bookings  Booking[]
+  travellers Traveller[]
+
+  @@index([phone])
+}
+
+enum EnquirySource {
+  WALK_IN
+  PHONE
+  WHATSAPP
+  WEBSITE
+  INSTAGRAM
+  REFERRAL
+  AGENT
+  OTHER
+}
+
+enum EnquiryStage {
+  NEW
+  CONTACTED
+  QUOTED
+  NEGOTIATING
+  CONVERTED
+  LOST
+}
+
+model Enquiry {
+  id         String        @id @default(cuid())
+  code       String        @unique // ENQ-2026-0001, what staff say on the phone
+  customer   Customer      @relation(fields: [customerId], references: [id])
+  customerId String
+  source     EnquirySource @default(WHATSAPP)
+  stage      EnquiryStage  @default(NEW)
+
+  destination String // free text: "Bali", "Manali + Kasol", "Europe 3 countries"
+  travelFrom  DateTime?
+  travelTo    DateTime?
+  nights      Int?
+  adults      Int       @default(2)
+  children    Int       @default(0)
+  infants     Int       @default(0)
+  budgetPaise Int? // what they said they wanted to spend
+
+  requirements String? // hotel category, food, pace, anything they insisted on
+  nextFollowUp DateTime?
+  lostReason   String? // "price", "went with another agent", "postponed"
+
+  owner   User?   @relation(fields: [ownerId], references: [id])
+  ownerId String?
+
+  quotations Quotation[]
+  booking    Booking?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([stage, nextFollowUp])
+}
+
+// ---------------------------------------------------------------------
+// Packages and itineraries
+//
+// A Package is a template the operator sells repeatedly. A Quotation
+// copies its days rather than referencing them, because a quote must not
+// change when someone edits the template months later.
+// ---------------------------------------------------------------------
+
+model Package {
+  id          String  @id @default(cuid())
+  name        String
+  destination String
+  nights      Int
+  summary     String?
+  active      Boolean @default(true)
+
+  // Indicative, per adult on twin sharing: the number used in marketing.
+  fromPricePaise Int?
+
+  days       PackageDay[]
+  quotations Quotation[]
+  createdAt  DateTime     @default(now())
+}
+
+model PackageDay {
+  id        String  @id @default(cuid())
+  package   Package @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  packageId String
+  dayNumber Int
+  title     String // "Arrive in Leh, acclimatise"
+  detail    String?
+  stayCity  String?
+  meals     String? // "B", "B,D", "all"
+
+  @@unique([packageId, dayNumber])
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+model Quotation {
+  id        String          @id @default(cuid())
+  code      String          @unique // QTN-2026-0001
+  enquiry   Enquiry         @relation(fields: [enquiryId], references: [id])
+  enquiryId String
+  package   Package?        @relation(fields: [packageId], references: [id])
+  packageId String?
+  version   Int             @default(1) // quotes get revised; keep every version
+  status    QuotationStatus @default(DRAFT)
+
+  title     String
+  inclusions String?
+  exclusions String?
+  terms      String?
+  validUntil DateTime?
+
+  // What the customer is charged. Cost sits on the booking, not here:
+  // a quotation is a price, not a plan of purchases.
+  perAdultPaise  Int
+  perChildPaise  Int @default(0)
+  adults         Int
+  children       Int
+  discountPaise  Int @default(0)
+
+  days    QuotationDay[]
+  booking Booking?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model QuotationDay {
+  id          String    @id @default(cuid())
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  quotationId String
+  dayNumber   Int
+  title       String
+  detail      String?
+  stayCity    String?
+  meals       String?
+
+  @@unique([quotationId, dayNumber])
+}
+
+// ---------------------------------------------------------------------
+// Bookings: a confirmed trip
+// ---------------------------------------------------------------------
+
+enum BookingStatus {
+  CONFIRMED
+  TRAVELLING
+  COMPLETED
+  CANCELLED
+}
+
+model Booking {
+  id          String        @id @default(cuid())
+  code        String        @unique // TRP-2026-0001
+  customer    Customer      @relation(fields: [customerId], references: [id])
+  customerId  String
+  enquiry     Enquiry?      @relation(fields: [enquiryId], references: [id])
+  enquiryId   String?       @unique
+  quotation   Quotation?    @relation(fields: [quotationId], references: [id])
+  quotationId String?       @unique
+  status      BookingStatus @default(CONFIRMED)
+
+  destination String
+  travelFrom  DateTime
+  travelTo    DateTime
+
+  // Agreed sell price, copied from the quotation at confirmation so later
+  // edits to the quote cannot silently change what was agreed.
+  sellPaise Int
+
+  owner   User?   @relation(fields: [ownerId], references: [id])
+  ownerId String?
+
+  travellers     Traveller[]
+  payments       Payment[]
+  vendorBookings VendorBooking[]
+  invoices       Invoice[]
+  documents      Document[]
+  cancellation   Cancellation?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([travelFrom])
+  @@index([status])
+}
+
+enum PaxType {
+  ADULT
+  CHILD
+  INFANT
+}
+
+model Traveller {
+  id        String  @id @default(cuid())
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String
+
+  // Repeat travellers are linked to the customer so their documents can
+  // be reused next time without retyping.
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  customerId String?
+
+  fullName  String // exactly as printed on the ID, for tickets and hotels
+  paxType   PaxType @default(ADULT)
+  dob       DateTime?
+  gender    String?
+  phone     String?
+  idType    String? // Aadhaar, passport, driving licence
+  idNumber  String?
+  passportExpiry DateTime?
+  mealNote  String?
+  medicalNote String?
+}
+
+// ---------------------------------------------------------------------
+// Money in: instalments are the norm here, not the exception
+// ---------------------------------------------------------------------
+
+enum PaymentMode {
+  CASH
+  UPI
+  BANK_TRANSFER
+  CARD
+  CHEQUE
+  OTHER
+}
+
+enum PaymentKind {
+  ADVANCE
+  INSTALMENT
+  BALANCE
+  REFUND
+}
+
+model Payment {
+  id        String      @id @default(cuid())
+  booking   Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String
+  kind      PaymentKind @default(INSTALMENT)
+  mode      PaymentMode @default(UPI)
+
+  amountPaise Int // negative for a refund
+  paidOn      DateTime  @default(now())
+  dueOn       DateTime? // set on a planned instalment that has not arrived
+  reference   String? // UPI reference, cheque number
+  receivedBy  String?
+  note        String?
+
+  @@index([bookingId])
+  @@index([dueOn])
+}
+
+// ---------------------------------------------------------------------
+// Money out: what the trip costs, and therefore the margin
+// ---------------------------------------------------------------------
+
+enum VendorType {
+  HOTEL
+  TRANSPORT
+  ACTIVITY
+  GUIDE
+  AIRLINE
+  TRAIN
+  INSURANCE
+  DMC // destination management company
+  OTHER
+}
+
+model Vendor {
+  id      String     @id @default(cuid())
+  name    String
+  type    VendorType
+  city    String?
+  phone   String?
+  email   String?
+  gstin   String?
+  notes   String?
+  active  Boolean    @default(true)
+
+  bookings VendorBooking[]
+}
+
+enum VendorStatus {
+  PLANNED // in the costing, not yet booked
+  REQUESTED
+  CONFIRMED
+  PAID
+  CANCELLED
+}
+
+model VendorBooking {
+  id        String       @id @default(cuid())
+  booking   Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String
+  vendor    Vendor       @relation(fields: [vendorId], references: [id])
+  vendorId  String
+  status    VendorStatus @default(PLANNED)
+
+  description String // "Hotel Grand, 2 rooms, 3 nights, BB"
+  serviceFrom DateTime?
+  serviceTo   DateTime?
+  confirmationNo String?
+
+  costPaise      Int // what the operator pays
+  paidPaise      Int @default(0)
+  dueOn          DateTime?
+
+  @@index([bookingId])
+  @@index([status, dueOn])
+}
+
+// ---------------------------------------------------------------------
+// Invoices
+//
+// GST on tour packages in India is usually 5% without input tax credit on
+// the gross package, or 18% on a service fee when acting as a pure agent.
+// Which applies is a decision for the operator's accountant, so the rate
+// is stored per invoice rather than assumed.
+// ---------------------------------------------------------------------
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  CANCELLED
+}
+
+model Invoice {
+  id        String        @id @default(cuid())
+  number    String        @unique // INV-2026-0001, must be sequential for GST
+  booking   Booking       @relation(fields: [bookingId], references: [id])
+  bookingId String
+  status    InvoiceStatus @default(DRAFT)
+
+  issuedOn DateTime @default(now())
+  dueOn    DateTime?
+
+  // Stored, not computed, so a reissued invoice always shows what was sent.
+  subtotalPaise Int
+  gstRate       Int @default(5) // percent
+  gstPaise      Int
+  totalPaise    Int
+
+  placeOfSupply String? // state, which decides CGST+SGST versus IGST
+  customerGstin String?
+  notes         String?
+
+  lines InvoiceLine[]
+}
+
+model InvoiceLine {
+  id          String  @id @default(cuid())
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId   String
+  description String
+  quantity    Int     @default(1)
+  ratePaise   Int
+  amountPaise Int
+}
+
+// ---------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------
+
+enum DocumentKind {
+  VOUCHER
+  TICKET
+  ID_PROOF
+  VISA
+  INSURANCE
+  ITINERARY_PDF
+  OTHER
+}
+
+model Document {
+  id        String       @id @default(cuid())
+  booking   Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String
+  kind      DocumentKind
+  name      String
+  url       String // object storage key or path
+  createdAt DateTime     @default(now())
+}
+
+model Cancellation {
+  id        String   @id @default(cuid())
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String   @unique
+  reason    String
+  // What the customer loses and what vendors kept: both are needed to
+  // work out what is actually refundable.
+  retentionPaise Int @default(0)
+  vendorLossPaise Int @default(0)
+  refundPaise    Int @default(0)
+  cancelledOn    DateTime @default(now())
+}
+
+// A single timeline per record: who did what, and every WhatsApp or call
+// logged against an enquiry or booking. Staff trust a system that can
+// answer "what did we tell them last week".
+enum ActivityKind {
+  NOTE
+  CALL
+  WHATSAPP
+  EMAIL
+  STATUS_CHANGE
+  PAYMENT
+  SYSTEM
+}
+
+model Activity {
+  id     String       @id @default(cuid())
+  kind   ActivityKind @default(NOTE)
+  body   String
+  user   User?        @relation(fields: [userId], references: [id])
+  userId String?
+
+  enquiryId String?
+  bookingId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([enquiryId])
+  @@index([bookingId])
+}
+
+// Reminders the system should send: balance due, documents missing,
+// departure approaching, return follow-up for a review.
+enum ReminderKind {
+  FOLLOW_UP
+  BALANCE_DUE
+  DOCUMENTS_PENDING
+  DEPARTURE
+  RETURN_FEEDBACK
+  VENDOR_PAYMENT
+}
+
+model Reminder {
+  id        String       @id @default(cuid())
+  kind      ReminderKind
+  dueOn     DateTime
+  sentAt    DateTime?
+  channel   String       @default("whatsapp")
+  body      String
+  enquiryId String?
+  bookingId String?
+
+  @@index([dueOn, sentAt])
+}
+
+// One row, the operator's own details, used on invoices and vouchers.
+model Settings {
+  id            Int     @id @default(1)
+  businessName  String
+  address       String?
+  phone         String?
+  email         String?
+  gstin         String?
+  pan           String?
+  logoUrl       String?
+  invoicePrefix String  @default("INV")
+  defaultGstRate Int    @default(5)
+  terms         String?
+}
